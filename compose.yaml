@@ -1,0 +1,178 @@
+version: "3.8"
+
+networks:
+  app:
+    ipam:
+      driver: default
+      config:
+        - subnet: "172.100.0.0/16"
+
+services:
+
+  config-service:
+    hostname: config-service
+    container_name: config-service
+    image: config-service:latest
+    ports:
+      - "8888:8888"
+    networks:
+       - app
+    
+  eureka:
+    container_name: eureka
+    depends_on:
+      - config-service
+    image: eureka:latest
+    ports:
+      - "9000:9000"
+    environment:
+      CONFIG_SERVER_ADDRESS: config-service:8888
+      EUREKA_ADDRESS: 172.100.0.20:9000
+    networks:
+       app:
+        ipv4_address: 172.100.0.20
+
+  db:
+    hostname: db
+    container_name: db
+    image: postgres:latest
+    depends_on:
+      - config-service
+      - eureka
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: user
+    ports:
+      - "5432:5432"
+    networks:
+       - app
+
+  kafka:
+    image: confluentinc/cp-kafka:7.3.3
+    hostname: kafka
+    container_name: kafka
+    ports:
+      - "39092:39092"
+    environment:
+      KAFKA_LISTENERS: BROKER://kafka:19092,EXTERNAL://kafka:39092,CONTROLLER://kafka:9093
+      KAFKA_ADVERTISED_LISTENERS: BROKER://kafka:19092,EXTERNAL://kafka:39092
+      KAFKA_INTER_BROKER_LISTENER_NAME: BROKER
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,BROKER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_PROCESS_ROLES: 'controller,broker'
+      KAFKA_NODE_ID: 1
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:9093'
+      KAFKA_LOG_DIRS: '/tmp/kraft-combined-logs'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    volumes:
+      - kafka1-data:/var/lib/kafka/data
+      - ./scripts/update_run.sh:/tmp/update_run.sh
+      - ./clusterID:/tmp/clusterID
+    command: "bash -c '/tmp/update_run.sh && /etc/confluent/docker/run'"
+    networks:
+      - app
+
+  kafka-gen:
+    image: confluentinc/cp-kafka:7.3.3
+    hostname: kafka-gen
+    container_name: kafka-gen
+    volumes:
+      - ./scripts/create_cluster_id.sh:/tmp/create_cluster_id.sh
+      - ./clusterID:/tmp/clusterID
+    command: "bash -c '/tmp/create_cluster_id.sh'"
+
+  kafka-ui:
+    container_name: kafka-ui
+    image: provectuslabs/kafka-ui:latest
+    ports:
+      - 8080:8080
+    environment:
+      DYNAMIC_CONFIG_ENABLED: true
+    networks:
+      - app
+
+  gateway:
+    hostname: gateway
+    container_name: gateway
+    depends_on:
+      - config-service
+      - eureka
+      - kafka
+      - security
+    image: gateway:latest
+    ports:
+      - "8000:8000"
+    environment:
+      CONFIG_SERVER_ADDRESS: config-service:8888
+      EUREKA_ADDRESS: 172.100.0.20:9000
+      KAFKA_ADDRESS: kafka
+      KAFKA_PORT: 39092
+      TOPIC_REQUEST: securityRequest
+      TOPIC_RESPONSE: securityResponses
+      LOCALHOST_GATEWAY_ADDRESS: http://localhost:8000
+    networks:
+      - app
+  
+  security:
+    hostname: security
+    container_name: security
+    depends_on:
+      - config-service
+      - eureka
+      - db
+    image: security:latest
+    ports:
+      - "10000:10000"
+    environment:
+      CONFIG_SERVER_ADDRESS: config-service:8888
+      EUREKA_ADDRESS: 172.100.0.20:9000
+      DB_ADDRESS: db:5432
+      LOCALHOST_GATEWAY_ADDRESS: http://localhost:8000
+      KAFKA_ADDRESS: kafka
+      KAFKA_PORT: 39092
+      TOPIC_REQUEST: securityRequest
+      TOPIC_RESPONSE: securityResponses
+    networks:
+      - app
+
+  clients:
+    depends_on:
+      - config-service
+      - eureka
+      - mongo
+    image: clients:latest
+    deploy:
+      mode: replicated
+      replicas: 2
+    environment:
+      CONFIG_SERVER_ADDRESS: config-service:8888
+      EUREKA_ADDRESS: 172.100.0.20:9000
+      MONGO_ADDRESS: mongo:27017
+      MONGO_USER: admin
+      MONGO_PASSWORD: admin
+      MONGO_DB: mongodb
+      LOCALHOST_GATEWAY_ADDRESS: http://localhost:8000
+    networks:
+      - app
+
+  mongo:
+    image: mongo:latest
+    restart: always
+    container_name: mongo
+    hostname: mongo
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: admin
+      TZ: "Europe/London"
+      MONGO_INITDB_DATABASE: mongodb
+    volumes:
+      - data:/data
+      - ./docker-entrypoint-initdb.d/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    ports:
+      - 27017:27017
+    networks:
+      - app
+      
+volumes:
+  kafka1-data:
+  data:
